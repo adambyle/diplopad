@@ -6,6 +6,6 @@ DiploPad is a virtual notepad for the board game *Diplomacy* with customizable f
 
 * Syntax verification: DiploPad will only let players submit validly formatted moves.
 * Legal move verification: DiploPad will only let players submit valid moves, forbidding orders like illegally moving a unit to a non-adjacent province.
-* Automatic adjudicaiton: DiploPad will keep an internal copy of the board, using that data to adjudicate player orders automatically.
+* Automatic adjudication: DiploPad will keep an internal copy of the board, using that data to adjudicate player orders automatically.
 
-This technology is not new--similar systems are used in online *Diplomacy* websites. The distinction is that DiploPad is designed to be a lightweight tool for use in in-person games with a physical board. DiploPad does not include a map in its interface for this reason.
+This technology is not new--similar systems are used for online *Diplomacy* websites. The distinction is that DiploPad is designed to be a lightweight tool for use in in-person games with a physical board. DiploPad does not include a map in its interface for this reason.
