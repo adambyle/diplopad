@@ -13,11 +13,11 @@ const (
 	// InvalidOrder signifies a malformed [Order] object. See docs of
 	// that type for valid forms.
 	InvalidOrder OrderKind = iota
-	// Hold keeps a unit in place or disbands it (depending on phase).
-	Hold
-	// Move directs a unit to a neighboring province, or retreats there
+	// HoldDisband keeps a unit in place or disbands it (depending on phase).
+	HoldDisband
+	// MoveRetreat directs a unit to a neighboring province, or retreats there
 	// (depending on phase).
-	Move
+	MoveRetreat
 	// SupportHold aids another unit's hold, support, or convoy.
 	SupportHold
 	// SupportMove aids another unit's move.
@@ -60,6 +60,58 @@ type Order struct {
 	Build Unit
 }
 
+// OrderHoldDisband creates a hold or disband order.
+func OrderHoldDisband(unit *Province) Order {
+	return Order{
+		Unit: unit,
+	}
+}
+
+// OrderMoveRetreat creates a move or retreat order. Coast empty when not needed.
+func OrderMoveRetreat(unit, destination *Province, coast string) Order {
+	return Order{
+		Unit:        unit,
+		Target:      destination,
+		TargetCoast: coast,
+	}
+}
+
+// OrderSupportHold creates a support-hold order.
+func OrderSupportHold(supporter, holder *Province) Order {
+	return Order{
+		Unit:      supporter,
+		Recipient: holder,
+	}
+}
+
+// OrderSupportMove creates a support-move order. Coast empty when not needed.
+func OrderSupportMove(supporter, mover, destination *Province, coast string) Order {
+	return Order{
+		Unit:        supporter,
+		Recipient:   mover,
+		Target:      destination,
+		TargetCoast: coast,
+	}
+}
+
+// OrderConvoy creates a convoy order.
+func OrderConvoy(fleet, army, destination *Province) Order {
+	return Order{
+		Unit:      fleet,
+		Recipient: army,
+		Target:    destination,
+		Convoy:    true,
+	}
+}
+
+// OrderBuild creates a build order.
+func OrderBuild(province *Province, unit Unit) Order {
+	return Order{
+		Target: province,
+		Build:  unit,
+	}
+}
+
 // Kind determines the form of the order (see list in docs for [Order])
 // based on which fields are set. It does not validate the order.
 func (o *Order) Kind() OrderKind {
@@ -71,9 +123,9 @@ func (o *Order) Kind() OrderKind {
 	)
 	switch {
 	case u && !r && !t && !c:
-		return Hold
+		return HoldDisband
 	case u && !r && t && !c:
-		return Move
+		return MoveRetreat
 	case u && r && !t && !c:
 		return SupportHold
 	case u && r && t && !c:

@@ -246,13 +246,19 @@ func (g *Game) Standoffs() iter.Seq[*Province] {
 	return maps.Keys(g.standoffs)
 }
 
+// DislodgedUnit gets a unit that has been dislodged from the province
+// for this retreat phase.
+func (g *Game) DislodgedUnit(province *Province) *Occupancy {
+	return g.dislodged[province]
+}
+
 // Dislodged is all the units that were dislodged in a prior
 // move phase and need to retreat or disband.
 //
 // The [Occupancy] values represent how things were in the prior phase;
 // the unit must retreat to an adjacent province or disband. It does
 // not mean a unit is actually present there for any other purpose.
-func (g *Game) Dislodged() iter.Seq[*Occupancy] {
+func (g *Game) AllDislodged() iter.Seq[*Occupancy] {
 	if !g.phase.Retreat() {
 		return nil
 	}
@@ -292,6 +298,25 @@ func (g *Game) CenterDistance(province *Province, country string) int {
 		distance += 1
 	}
 	return -1
+}
+
+// FarthestUnits gets a country's units in order of furthest from a controlled supply center.
+func (g *Game) FarthestUnits(country string) []*Occupancy {
+	var units []*Occupancy
+	distance := make(map[*Occupancy]int)
+	for u := range g.Units(country) {
+		d := g.CenterDistance(u.province, country)
+		units = append(units, u)
+		distance[u] = d
+	}
+	slices.SortFunc(units, func(a, b *Occupancy) int {
+		if cmp := distance[b] - distance[a]; cmp != 0 {
+			return cmp
+		} else {
+			return strings.Compare(a.province.name, b.province.name)
+		}
+	})
+	return units
 }
 
 func (g *Game) convoyChains(

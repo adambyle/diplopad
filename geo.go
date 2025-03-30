@@ -193,7 +193,7 @@ func (c *Connection) Reverse() *Connection {
 	}
 }
 
-// Board is a game map with nations, provinces, and the connections
+// Board is a game map with countries, provinces, and the connections
 // between provinces.
 type Board struct {
 	countries   []string
