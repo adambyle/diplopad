@@ -294,6 +294,16 @@ func (a *Arena) undo(country string, order Order, outcome Outcome) {
 	}
 }
 
+// Query gets the status of a country's order.
+//
+// If the order does not exist, it gets the outcome of that order
+// as if it had been added, without adding it.
+//
+// If the order already exists, it gets the outcome of that order.
+func (a *Arena) Query(country string, order Order) Outcome {
+	return a.do(country, order, false)
+}
+
 // Orders is all orders given by a country.
 func (a *Arena) Orders(country string) []Order {
 	orders := make([]Order, 0, len(a.countryOrders[country]))
@@ -306,6 +316,92 @@ func (a *Arena) Orders(country string) []Order {
 // Outcomes gets the outcome of each order a country has given.
 func (a *Arena) Outcomes(country string) map[Order]Outcome {
 	return maps.Clone(a.countryOrders[country])
+}
+
+// Unit gets the order given to a certain unit.
+func (a *Arena) Unit(unit *Occupancy) (Order, Outcome, bool) {
+	if o, ok := a.unitOrders[unit]; ok {
+		return o.order, o.outcome, true
+	} else {
+		return Order{}, 0, false
+	}
+}
+
+// Unordered is all units that have not been given an order yet.
+func (a *Arena) Unordered() iter.Seq[*Occupancy] {
+	return func(yield func(*Occupancy) bool) {
+		for u := range a.game.AllUnits() {
+			if _, ok := a.unitOrders[u]; ok {
+				continue
+			}
+			if !yield(u) {
+				return
+			}
+		}
+	}
+}
+
+// Retreats gets which units have been given retreat orders this phase.
+func (a *Arena) Retreats() iter.Seq2[*Occupancy, Order] {
+	if !a.game.phase.Retreat() {
+		return nil
+	}
+	return func(yield func(*Occupancy, Order) bool) {
+		for u, o := range a.unitOrders {
+			if o.order.Kind() != MoveRetreat {
+				continue
+			}
+			if !yield(u, o.order) {
+				return
+			}
+		}
+	}
+}
+
+// Disbandments gets which units have been ordered to be disbanded
+// in a retreat or build phase.
+//
+// It does not include automatic disbandments, such as unordered
+// units or civil-disorder disbandments in a build phase.
+// See [Arena.Unordered] or [Game.FarthestUnits].
+func (a *Arena) Disbandments() iter.Seq[*Occupancy] {
+	if a.game.phase.Move() {
+		return nil
+	}
+	return func(yield func(*Occupancy) bool) {
+		for u, o := range a.unitOrders {
+			if o.order.Kind() != HoldDisband {
+				continue
+			}
+			if !yield(u) {
+				return
+			}
+		}
+	}
+}
+
+// Build gets what kind of unit is being built on a province this phase, if any.
+func (a *Arena) Build(province *Province) (unit Unit, coast string, ok bool) {
+	if b, ok := a.builds[province]; ok {
+		return b.unit, b.coast, true
+	} else {
+		return 0, "", false
+	}
+}
+
+// Builds gets all provinces being built in this phase.
+func (a *Arena) Builds() iter.Seq[*Province] {
+	return maps.Keys(a.builds)
+}
+
+// BuildCountLeft is the number of remaining builds a country has.
+//
+// It is simply the difference between controlled supply centers and existing units;
+// it does not factor in how many home supply centers are available.
+//
+// If it is negative, the magnitude is how many more disbandments must be made this phase.
+func (a *Arena) BuildCountLeft(country string) int {
+	return a.buildCount[country]
 }
 
 // Add processes and saves a country's order.
@@ -331,16 +427,6 @@ func (a *Arena) Clear(country string) {
 		a.undo(country, order, outcome)
 	}
 	delete(a.countryOrders, country)
-}
-
-// Query gets the status of a country's order.
-//
-// If the order does not exist, it gets the outcome of that order
-// as if it had been added, without adding it.
-//
-// If the order already exists, it gets the outcome of that order.
-func (a *Arena) Query(country string, order Order) Outcome {
-	return a.do(country, order, false)
 }
 
 // FillIn gives the default orders to unordered units.
