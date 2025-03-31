@@ -2,6 +2,7 @@ package diplo
 
 import (
 	"errors"
+	"iter"
 	"maps"
 	"slices"
 )
@@ -23,6 +24,8 @@ const (
 	OutcomeBadTerrain
 	// OutcomeBadTarget says a unit tried to move somewhere it couldn't reach.
 	OutcomeBadTarget
+	// OutcomeBadCoast says a fleet tried to move to a coast it couldn't reach.
+	OutcomeBadCoast
 	// OutcomeCoastAmbiguous says a target coast was needed but not specified
 	OutcomeCoastAmbiguous
 	// OutcomeNoConvoy says an Army couldn't move since it wasn't convoyed.
@@ -31,13 +34,13 @@ const (
 	OutcomeBadRecipient
 	// OutcomeMissingRecipient says a unit doesn't exist where support was given.
 	OutcomeMissingRecipient
-	// OutcomeDislodged says a support or convoy failed because the unit was dislodged.
+	// OutcomeDislodged says a hold, support, or convoy failed because the unit was dislodged.
 	OutcomeDislodged
 	// OutcomeCut says a support failed because it was cut by an attack.
 	OutcomeCut
 	// OutcomeWeak says a move failed due to insufficient power.
 	OutcomeWeak
-	// OutcomeOpposed says a move failed because other units opposed it.
+	// OutcomeStandoff says a move failed because other units opposed it.
 	OutcomeStandoff
 	// OutcomeOverpowered says a move failed because another unit moved in.
 	OutcomeOverpowered
@@ -61,13 +64,18 @@ type build struct {
 	coast string
 }
 
+type unitOrder struct {
+	order   Order
+	outcome Outcome
+}
+
 // Arena is an interactive helper for resolving orders.
 //
 // Orders can be added and queried incrementally.
 type Arena struct {
 	game          *Game
 	countryOrders map[string]map[Order]Outcome
-	unitOrders    map[*Occupancy]Order
+	unitOrders    map[*Occupancy]unitOrder
 	builds        map[*Province]build
 	buildCount    map[string]int
 }
@@ -77,7 +85,7 @@ func (g *Game) Arena() *Arena {
 	a := &Arena{
 		game:          g,
 		countryOrders: make(map[string]map[Order]Outcome),
-		unitOrders:    make(map[*Occupancy]Order),
+		unitOrders:    make(map[*Occupancy]unitOrder),
 		builds:        make(map[*Province]build),
 	}
 	if g.phase == Winter {
@@ -135,7 +143,8 @@ func (a *Arena) doMovePhase(country string, order Order) (*Occupancy, Outcome) {
 }
 
 func (a *Arena) doRetreatPhase(country string, order Order) (*Occupancy, Outcome) {
-	if k := order.Kind(); k != HoldDisband && k != MoveRetreat {
+	k := order.Kind()
+	if k != HoldDisband && k != MoveRetreat {
 		return nil, OutcomeMalformed
 	}
 	unit := a.game.DislodgedUnit(order.Unit)
@@ -148,7 +157,30 @@ func (a *Arena) doRetreatPhase(country string, order Order) (*Occupancy, Outcome
 	if _, ok := a.unitOrders[unit]; ok {
 		return nil, OutcomeRepeatUnit
 	}
-	// TODO
+	if k == HoldDisband {
+		// Disbands always work.
+		return unit, OutcomeSuccess
+	}
+	if !a.game.HasNeighbor(unit, order.Target) {
+		if order.Target.terrain.Supports(unit.unit) {
+			return unit, OutcomeBadTarget
+		} else {
+			return unit, OutcomeBadTerrain
+		}
+	}
+	if a.game.standoffs[order.Target] {
+		return unit, OutcomeStandoff
+	}
+	if unit.unit == Fleet {
+		cs := a.game.board.Connection(unit.province, order.Target).toCoasts
+		tc := order.TargetCoast
+		if len(cs) > 1 && tc == "" {
+			return unit, OutcomeCoastAmbiguous
+		}
+		if len(cs) > 0 && tc != "" && !slices.Contains(cs, tc) {
+			return unit, OutcomeBadCoast
+		}
+	}
 	return unit, OutcomeSuccess
 }
 
@@ -182,7 +214,7 @@ func (a *Arena) doBuildPhase(country string, order Order) (*Occupancy, Outcome) 
 		if a.game.Unit(order.Target) != nil {
 			return nil, OutcomeOccupied
 		}
-		if order.Target.terrain.Supports(order.Build) != nil {
+		if !order.Target.terrain.Supports(order.Build) {
 			return nil, OutcomeBadTerrain
 		}
 		if c := order.Target.coasts; len(c) > 0 && !slices.Contains(c, order.TargetCoast) {
@@ -218,14 +250,48 @@ func (a *Arena) do(country string, order Order, add bool) Outcome {
 	if add {
 		a.countryOrders[country][order] = o
 		if u != nil {
-			a.unitOrders[u] = order
+			a.unitOrders[u] = unitOrder{order, o}
 		}
 	}
 	return o
 }
 
-func (a *Arena) undo(country string, order Order) {
+func outcomeAssigned(outcome Outcome) bool {
+	switch outcome {
+	case OutcomeMalformed, OutcomeRepeatUnit, OutcomeEnemyUnit, OutcomeMissingUnit:
+		return false
+	default:
+		return true
+	}
+}
 
+func (a *Arena) undo(country string, order Order, outcome Outcome) {
+	switch {
+	case a.game.phase.Move():
+		if !outcomeAssigned(outcome) {
+			return
+		}
+		unit := a.game.Unit(order.Unit)
+		delete(a.unitOrders, unit)
+	case a.game.phase.Retreat():
+		if !outcomeAssigned(outcome) {
+			return
+		}
+		unit := a.game.DislodgedUnit(order.Unit)
+		delete(a.unitOrders, unit)
+	case a.game.phase == Winter:
+		if outcome != OutcomeSuccess {
+			return
+		}
+		if order.Kind() == HoldDisband {
+			unit := a.game.Unit(order.Unit)
+			delete(a.unitOrders, unit)
+			a.buildCount[country]++
+		} else {
+			delete(a.builds, order.Target)
+			a.buildCount[country]--
+		}
+	}
 }
 
 // Orders is all orders given by a country.
@@ -253,29 +319,57 @@ func (a *Arena) Add(country string, order Order) (Outcome, error) {
 
 // Remove undoes a country's order, if it has been made.
 func (a *Arena) Remove(country string, order Order) {
-	if _, ok := a.countryOrders[country][order]; ok {
-		a.undo(country, order)
+	if outcome, ok := a.countryOrders[country][order]; ok {
+		a.undo(country, order, outcome)
 		delete(a.countryOrders[country], order)
 	}
 }
 
 // Clear resets the orders given by a certain country.
 func (a *Arena) Clear(country string) {
-	for order := range a.countryOrders[country] {
-		a.undo(country, order)
+	for order, outcome := range a.countryOrders[country] {
+		a.undo(country, order, outcome)
 	}
 	delete(a.countryOrders, country)
 }
 
-// Query gets the status of a country's order if it was added
-// to the arena.
+// Query gets the status of a country's order.
 //
-// (It does not get the status of an existing order.)
+// If the order does not exist, it gets the outcome of that order
+// as if it had been added, without adding it.
+//
+// If the order already exists, it gets the outcome of that order.
 func (a *Arena) Query(country string, order Order) Outcome {
 	return a.do(country, order, false)
 }
 
+// FillIn gives the default orders to unordered units.
+//
+// It does not handle civil disorder disband conditions for Winter. The default
+// order set in a Winter phase has no builds and no disbands.
+func (a *Arena) FillIn() {
+	if a.game.phase == Winter {
+		return
+	}
+	// Unordered units hold or disband.
+	var units iter.Seq[*Occupancy]
+	if a.game.phase.Move() {
+		units = a.game.AllUnits()
+	} else {
+		units = a.game.AllDislodged()
+	}
+	for u := range units {
+		if _, ok := a.unitOrders[u]; ok {
+			continue
+		}
+		a.Add(u.country, OrderHoldDisband(u.province))
+	}
+}
+
+// Go creates a new game state following the adjudication
+// of the orders added to the arena.
 func (a *Arena) Go() *Game {
+	a.FillIn()
 	next := &Game{
 		board:       a.game.board,
 		year:        a.game.year,
@@ -289,10 +383,39 @@ func (a *Arena) Go() *Game {
 	// Apply successful orders.
 	switch {
 	case a.game.phase.Move():
-		// TODO
-		// Don't forget to update dislodges.
+		for u := range a.game.AllUnits() {
+			uo := a.unitOrders[u]
+			if uo.outcome == OutcomeDislodged {
+				next.AddDislodged(u.province, u.coast, u.unit, u.country)
+			} else if uo.order.Kind() == MoveRetreat && uo.outcome == OutcomeSuccess {
+				coast := uo.order.TargetCoast
+				cs := a.game.board.Connection(u.province, uo.order.Target).toCoasts
+				if coast == "" && len(cs) > 0 {
+					coast = cs[0]
+				}
+				if len(cs) == 0 {
+					coast = ""
+				}
+				next.SetUnit(uo.order.Target, coast, u.unit, u.country)
+			}
+		}
 	case a.game.phase.Retreat():
-		// TODO
+		for u := range a.game.AllDislodged() {
+			uo := a.unitOrders[u]
+			if uo.order.Kind() != MoveRetreat || uo.outcome != OutcomeSuccess {
+				// Order failed or unit deliberately disbanded.
+				continue
+			}
+			coast := uo.order.TargetCoast
+			cs := a.game.board.Connection(u.province, uo.order.Target).toCoasts
+			if coast == "" && len(cs) > 0 {
+				coast = cs[0]
+			}
+			if len(cs) == 0 {
+				coast = ""
+			}
+			next.SetUnit(uo.order.Target, coast, u.unit, u.country)
+		}
 	case a.game.phase == Winter:
 		// Civil disorder: disband units.
 		cd := make(map[*Occupancy]bool)

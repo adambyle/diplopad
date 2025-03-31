@@ -364,7 +364,7 @@ func (g *Game) ConvoyChains(from, to *Province) [][]*Province {
 //
 // It requires the province to be adjacent or for there to be a legal convoy route.
 func (g *Game) HasDestination(unit *Occupancy, destination *Province) bool {
-	if unit == nil || destination == nil || destination.terrain.Supports(unit.unit) != nil {
+	if unit == nil || destination == nil || !destination.terrain.Supports(unit.unit) {
 		return false
 	}
 	if g.board.Connection(unit.province, destination) != nil {
@@ -453,6 +453,13 @@ func (g *Game) Destinations(unit *Occupancy) iter.Seq[*Province] {
 	}
 }
 
+// HasNeighbor determines whether a unit can travel to the adjancent destination.
+func (g *Game) HasNeighbor(unit *Occupancy, destination *Province) bool {
+	return g.board.Connection(unit.province, destination) != nil &&
+		destination.terrain.Supports(unit.unit)
+}
+
+// Neighbors gets which adjacent provinces a unit can travel to.
 func (g *Game) Neighbors(unit *Occupancy) iter.Seq[*Province] {
 	if unit == nil {
 		return nil
@@ -460,7 +467,7 @@ func (g *Game) Neighbors(unit *Occupancy) iter.Seq[*Province] {
 	return func(yield func(*Province) bool) {
 		for c := range g.board.ConnectionsFrom(unit.province) {
 			to := c.to
-			if to.terrain.Supports(unit.unit) != nil {
+			if !to.terrain.Supports(unit.unit) {
 				continue
 			}
 			if !yield(to) {
@@ -484,8 +491,8 @@ func (g *Game) validSetUnit(p *Province, cs string, u Unit, cn string) (*Occupan
 	} else {
 		cs = ""
 	}
-	if err := p.terrain.Supports(u); err != nil {
-		return nil, err
+	if !p.terrain.Supports(u) {
+		return nil, errors.New("unit cannot occupy terrain")
 	}
 	return &Occupancy{p, cs, u, cn}, nil
 }

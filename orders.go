@@ -117,8 +117,8 @@ func OrderBuild(province *Province, unit Unit) Order {
 func (o *Order) Kind() OrderKind {
 	var (
 		u = o.Unit != nil
-		r = o.Unit != nil
-		t = o.Unit != nil
+		r = o.Recipient != nil
+		t = o.Target != nil
 		c = o.Convoy
 	)
 	switch {

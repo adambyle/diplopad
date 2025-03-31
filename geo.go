@@ -23,15 +23,12 @@ const (
 )
 
 // Supports tells whether a unit type can occupy the terrain.
-func (t Terrain) Supports(u Unit) error {
+func (t Terrain) Supports(u Unit) bool {
 	var (
 		badArmy  = u == Army && t == Water
 		badFleet = u == Fleet && t == Inland
 	)
-	if badArmy || badFleet {
-		return errors.New("unit cannot occupy terrain")
-	}
-	return nil
+	return !badArmy && !badFleet
 }
 
 // Province is a space is on the game board that a unit can occupy.
