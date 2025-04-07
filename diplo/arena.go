@@ -15,6 +15,7 @@ const (
 	// OutcomeMalformed says an order doesn't take a valid form for the phase.
 	OutcomeMalformed
 	// OutcomeRepeatUnit says the unit has already been given an order.
+	// In a build phase, the province has already been ordered to build in.
 	OutcomeRepeatUnit
 	// OutcomeEnemyUnit says the unit does not belong to the ordering country.
 	OutcomeEnemyUnit
@@ -44,6 +45,11 @@ const (
 	OutcomeStandoff
 	// OutcomeOverpowered says a move failed because another unit moved in.
 	OutcomeOverpowered
+	// RETREATS ONLY:
+	// OutcomeContested says a unit cannot retreat to a previously contested province.
+	OutcomeContested
+	// OutcomeBadRetreatToAttacker says a unit cannot retreat across a border its attacker crossed to dislodge it.
+	OutcomeBadRetreatToAttacker
 	// BUILDS ONLY:
 	// OutcomeNoBuilds says a country is out of builds and cannot make this unit.
 	OutcomeNoBuilds
@@ -75,9 +81,18 @@ type unitOrder struct {
 type Arena struct {
 	game          *Game
 	countryOrders map[string]map[Order]Outcome
-	unitOrders    map[*Occupancy]unitOrder
-	builds        map[*Province]build
-	buildCount    map[string]int
+	unitOrders    map[*Occupancy]*unitOrder
+	// Move phase.
+	moving     map[*Occupancy]*Province    // where the unit is moving (successfully, after convoy resolution)
+	convoying  map[*Occupancy]bool         // Fleets that are convoying
+	supporters map[*Occupancy][]*Occupancy // the strength of a unit's order
+	attackers  map[*Occupancy]*Province    // provinces a successful attack on the unit came from
+	convoyed   map[*Occupancy]bool         // whether the unit successfully took a convoy route
+	// Retreat phase
+	retreaters map[*Province][]*Occupancy // units wanting to retreat to the province
+	// Build phase.
+	builds     map[*Province]build // successful
+	buildCount map[string]int
 }
 
 // Arena creates a new interactive set of unit orders.
@@ -85,10 +100,19 @@ func (g *Game) Arena() *Arena {
 	a := &Arena{
 		game:          g,
 		countryOrders: make(map[string]map[Order]Outcome),
-		unitOrders:    make(map[*Occupancy]unitOrder),
-		builds:        make(map[*Province]build),
+		unitOrders:    make(map[*Occupancy]*unitOrder),
 	}
-	if g.phase == Winter {
+	switch {
+	case g.phase.Move():
+		a.moving = make(map[*Occupancy]*Province)
+		a.convoying = make(map[*Occupancy]bool)
+		a.supporters = make(map[*Occupancy][]*Occupancy)
+		a.attackers = make(map[*Occupancy]*Province)
+		a.convoyed = make(map[*Occupancy]bool)
+	case g.phase.Retreat():
+		a.retreaters = make(map[*Province][]*Occupancy)
+	case g.phase == Winter:
+		a.builds = make(map[*Province]build)
 		a.buildCount = make(map[string]int)
 		for _, country := range g.board.countries {
 			a.buildCount[country] = g.CenterCount(country) - g.UnitCount(country)
@@ -168,8 +192,11 @@ func (a *Arena) doRetreatPhase(country string, order Order) (*Occupancy, Outcome
 			return unit, OutcomeBadTerrain
 		}
 	}
-	if a.game.standoffs[order.Target] {
-		return unit, OutcomeStandoff
+	if a.game.contests[order.Target] {
+		return unit, OutcomeContested
+	}
+	if order.Target == a.game.attackers[unit] {
+		return unit, OutcomeBadRetreatToAttacker
 	}
 	if unit.unit == Fleet {
 		cs := a.game.board.Connection(unit.province, order.Target).toCoasts
@@ -181,7 +208,18 @@ func (a *Arena) doRetreatPhase(country string, order Order) (*Occupancy, Outcome
 			return unit, OutcomeBadCoast
 		}
 	}
-	return unit, OutcomeSuccess
+	// If there are multiple retreaters to the target province,
+	// all of them fail (standoff) and will disband.
+	rs := append(a.retreaters[order.Target], unit)
+	a.retreaters[order.Target] = rs
+	if len(rs) == 1 {
+		return unit, OutcomeSuccess
+	} else {
+		for _, r := range rs {
+			a.unitOrders[r].outcome = OutcomeStandoff
+		}
+		return unit, OutcomeStandoff
+	}
 }
 
 func (a *Arena) doBuildPhase(country string, order Order) (*Occupancy, Outcome) {
@@ -204,6 +242,9 @@ func (a *Arena) doBuildPhase(country string, order Order) (*Occupancy, Outcome) 
 	case Build:
 		if a.buildCount[country] <= 0 {
 			return nil, OutcomeNoBuilds
+		}
+		if _, ok := a.builds[order.Target]; ok {
+			return nil, OutcomeRepeatUnit
 		}
 		if order.Target.country != country {
 			return nil, OutcomeNotHome
@@ -250,7 +291,7 @@ func (a *Arena) do(country string, order Order, add bool) Outcome {
 	if add {
 		a.countryOrders[country][order] = o
 		if u != nil {
-			a.unitOrders[u] = unitOrder{order, o}
+			a.unitOrders[u] = &unitOrder{order, o}
 		}
 	}
 	return o
@@ -273,12 +314,26 @@ func (a *Arena) undo(country string, order Order, outcome Outcome) {
 		}
 		unit := a.game.Unit(order.Unit)
 		delete(a.unitOrders, unit)
+		// TODO
 	case a.game.phase.Retreat():
 		if !outcomeAssigned(outcome) {
 			return
 		}
 		unit := a.game.DislodgedUnit(order.Unit)
 		delete(a.unitOrders, unit)
+		// Re-calculate retreats.
+		rs := a.retreaters[order.Target]
+		for i, r := range rs {
+			if r == unit {
+				rs[i] = rs[len(rs)-1]
+				rs = rs[:len(rs)-1]
+				a.retreaters[order.Target] = rs
+				break
+			}
+		}
+		if len(rs) == 1 {
+			a.unitOrders[rs[0]].outcome = OutcomeSuccess
+		}
 	case a.game.phase == Winter:
 		if outcome != OutcomeSuccess {
 			return
@@ -457,14 +512,13 @@ func (a *Arena) FillIn() {
 func (a *Arena) Go() *Game {
 	a.FillIn()
 	next := &Game{
-		board:       a.game.board,
-		year:        a.game.year,
-		phase:       a.game.phase,
-		units:       make(map[*Province]*Occupancy),
-		centers:     maps.Clone(a.game.centers),
-		coastParser: a.game.coastParser,
-		dislodged:   make(map[*Province]*Occupancy),
-		standoffs:   make(map[*Province]bool),
+		board:     a.game.board,
+		year:      a.game.year,
+		phase:     a.game.phase,
+		units:     make(map[*Province]*Occupancy),
+		centers:   maps.Clone(a.game.centers),
+		dislodged: make(map[*Province]*Occupancy),
+		contests:  make(map[*Province]bool),
 	}
 	// Apply successful orders.
 	switch {
@@ -472,7 +526,7 @@ func (a *Arena) Go() *Game {
 		for u := range a.game.AllUnits() {
 			uo := a.unitOrders[u]
 			if uo.outcome == OutcomeDislodged {
-				next.AddDislodged(u.province, u.coast, u.unit, u.country)
+				next.AddDislodged(u.province, u.coast, u.unit, u.country, a.attackers[u])
 			} else if uo.order.Kind() == MoveRetreat && uo.outcome == OutcomeSuccess {
 				coast := uo.order.TargetCoast
 				cs := a.game.board.Connection(u.province, uo.order.Target).toCoasts

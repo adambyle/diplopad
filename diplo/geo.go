@@ -9,17 +9,55 @@ import (
 	"strings"
 )
 
+func DefaultCoastParser(coast string) (string, bool) {
+	coast = strings.TrimSpace(strings.ToLower(coast))
+	switch coast {
+	case "east", "ec", "e":
+		return "EC", true
+	case "north", "nc", "n":
+		return "NC", true
+	case "south", "sc", "s":
+		return "SC", true
+	case "west", "wc", "w":
+		return "WC", true
+	default:
+		return "", false
+	}
+}
+
+func DefaultCountryParser(country string) (string, bool) {
+	country = strings.TrimSpace(strings.ToLower(country))
+	switch country {
+	case "a", "aus", "austria", "hungary", "austria-hungary":
+		return "Austria", true
+	case "e", "eng", "england":
+		return "England", true
+	case "f", "fra", "france":
+		return "France", true
+	case "g", "ger", "germany":
+		return "Germany", true
+	case "i", "ita", "italy":
+		return "Italy", true
+	case "r", "rus", "russia":
+		return "Russia", true
+	case "t", "tur", "turkey":
+		return "Turkey", true
+	default:
+		return "", false
+	}
+}
+
 // Terrain is a property of a province controlling
 // which units may occupy it.
-type Terrain int
+type Terrain string
 
 const (
 	// Inland provinces may be occupied by Armies.
-	Inland Terrain = iota
+	Inland Terrain = "Inland"
 	// Coastal provinces may be occupied by Armies or Fleets.
-	Coastal
+	Coastal Terrain = "Coastal"
 	// Water provinces may be occupied by Fleets.
-	Water
+	Water Terrain = "Water"
 )
 
 // Supports tells whether a unit type can occupy the terrain.
@@ -100,61 +138,7 @@ type endpoints struct {
 type Connection struct {
 	from, to             *Province
 	fromCoasts, toCoasts []string
-}
-
-func validEndpoint(name string, p *Province, cs []string) error {
-	if p == nil {
-		return errors.New("nil province")
-	}
-	if p.terrain == Coastal {
-		var (
-			pCoasts = len(p.coasts)
-			cCoasts = len(cs)
-		)
-		if pCoasts == 0 && cCoasts > 0 {
-			return fmt.Errorf(
-				"'%s' has no named coasts but '%sCoasts' is non-empty", name, name,
-			)
-		} else if pCoasts > 0 {
-			// Province has named coasts; coasts must be specified in connection.
-			if cCoasts == 0 {
-				return fmt.Errorf(
-					"'%s' has named coasts but '%sCoasts' is empty", name, name,
-				)
-			}
-			// Coasts specified in connection must be valid on province.
-			for _, c := range cs {
-				if !slices.Contains(p.coasts, c) {
-					return fmt.Errorf(
-						"no coast %s found on '%s'", c, name,
-					)
-				}
-			}
-		}
-	} else {
-		// Coasts may not be specified for non-coastal province.
-		if len(cs) > 0 {
-			return fmt.Errorf(
-				"'%s' is not coastal but '%sCoasts' is non-empty", name, name,
-			)
-		}
-	}
-	return nil
-}
-
-func (c *Connection) valid() error {
-	if c.from == c.to {
-		return errors.New("connection between same provinces")
-	}
-	// Check each endpoint.
-	var err error
-	if err = validEndpoint("from", c.from, c.fromCoasts); err != nil {
-		return err
-	}
-	if err = validEndpoint("to", c.to, c.toCoasts); err != nil {
-		return err
-	}
-	return nil
+	coastal              bool
 }
 
 // From is the start province in a connection.
@@ -179,6 +163,26 @@ func (c *Connection) ToCoasts() []string {
 	return slices.Clone(c.toCoasts)
 }
 
+// Coastal tells whether the provinces are connected
+// along a shared coast (so Fleets may move between them).
+func (c *Connection) Coastal() bool {
+	return c.coastal
+}
+
+// Traversable tells whether a unit kind can cross this connection.
+func (c *Connection) Traversable(unit Unit) bool {
+	// Unit must be able to occupy provinces.
+	if !c.from.terrain.Supports(unit) || !c.to.terrain.Supports(unit) {
+		return false
+	}
+	if unit == Fleet {
+		// Water provinces are fleet-traversable; otherwise the provinces are
+		// coastal and must be coastally connected.
+		return c.from.terrain == Water || c.to.terrain == Water || c.coastal
+	}
+	return true
+}
+
 // Reverse flips the "from" and "to" provinces, returning
 // an equivalent connection in the opposite direction.
 func (c *Connection) Reverse() *Connection {
@@ -187,15 +191,18 @@ func (c *Connection) Reverse() *Connection {
 		to:         c.from,
 		fromCoasts: c.toCoasts,
 		toCoasts:   c.fromCoasts,
+		coastal:    c.coastal,
 	}
 }
 
 // Board is a game map with countries, provinces, and the connections
 // between provinces.
 type Board struct {
-	countries   []string
-	provinces   []*Province
-	connections map[endpoints]*Connection
+	countries     []string
+	provinces     []*Province
+	connections   map[endpoints]*Connection
+	coastParser   func(string) (string, bool)
+	countryParser func(string) (string, bool)
 }
 
 func (b *Board) validCountry(country string) error {
@@ -382,5 +389,21 @@ func (b *Board) ConnectionsTo(province *Province) iter.Seq[*Connection] {
 				}
 			}
 		}
+	}
+}
+
+func (b *Board) ParseCoast(coast string) (string, bool) {
+	if p := b.coastParser; p != nil {
+		return p(coast)
+	} else {
+		return DefaultCoastParser(coast)
+	}
+}
+
+func (b *Board) ParseCountry(country string) (string, bool) {
+	if p := b.countryParser; p != nil {
+		return p(country)
+	} else {
+		return DefaultCountryParser(country)
 	}
 }

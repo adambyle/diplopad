@@ -76,41 +76,25 @@ func (o *Occupancy) Country() string {
 	return o.country
 }
 
-func DefaultCoastParser(coast string) (string, bool) {
-	coast = strings.TrimSpace(strings.ToLower(coast))
-	switch coast {
-	case "east", "ec", "e":
-		return "East", true
-	case "north", "nc", "n":
-		return "North", true
-	case "south", "sc", "s":
-		return "South", true
-	case "west", "wc", "w":
-		return "West", true
-	default:
-		return "", false
-	}
-}
-
 // Game is a state of an ongoing game, in between resolving orders.
 //
 // The zero-value for Game is unusable, since a game board needs to be provided.
 type Game struct {
-	board       *Board
-	year        int
-	phase       Phase
-	units       map[*Province]*Occupancy
-	centers     map[*Province]string
-	coastParser func(string) (string, bool)
+	board   *Board
+	year    int
+	phase   Phase
+	units   map[*Province]*Occupancy
+	centers map[*Province]string
 	// Used for retreats
 	dislodged map[*Province]*Occupancy // dislodged units
-	standoffs map[*Province]bool       // cannot retreat here
+	contests  map[*Province]bool       // cannot retreat here
+	attackers map[*Occupancy]*Province // cannot retreat to attacker province
 }
 
 // NewGame creates a fresh game state from the specified board.
 //
 // Important: each country will automatically control its home supply centers,
-// but the starting units must be added manually.
+// but the starting units must be added manually. See [StandardGameSetup].
 //
 // The game starts in [Spring] of [StartYear].
 func NewGame(board *Board) *Game {
@@ -130,7 +114,7 @@ func NewGame(board *Board) *Game {
 
 func (g *Game) resetRetreats() {
 	g.dislodged = make(map[*Province]*Occupancy)
-	g.standoffs = make(map[*Province]bool)
+	g.contests = make(map[*Province]bool)
 }
 
 // Board is the geographical layout the game uses.
@@ -237,13 +221,13 @@ func (g *Game) OpenHomeCenterCount(country string) int {
 	return count(g.OpenHomeCenters(country))
 }
 
-// Standoffs is which provinces had a standoff in the previous
+// Contested is which provinces had a standoff in the previous
 // [Spring] or [Fall] phase; these may not be retreated to.
-func (g *Game) Standoffs() iter.Seq[*Province] {
+func (g *Game) Contested() iter.Seq[*Province] {
 	if !g.phase.Retreat() {
 		return nil
 	}
-	return maps.Keys(g.standoffs)
+	return maps.Keys(g.contests)
 }
 
 // DislodgedUnit gets a unit that has been dislodged from the province
@@ -364,11 +348,11 @@ func (g *Game) ConvoyChains(from, to *Province) [][]*Province {
 //
 // It requires the province to be adjacent or for there to be a legal convoy route.
 func (g *Game) HasDestination(unit *Occupancy, destination *Province) bool {
-	if unit == nil || destination == nil || !destination.terrain.Supports(unit.unit) {
+	if unit == nil || destination == nil {
 		return false
 	}
-	if g.board.Connection(unit.province, destination) != nil {
-		return true
+	if c := g.board.Connection(unit.province, destination); c != nil {
+		return c.Traversable(unit.unit)
 	}
 	// Convoy routes.
 	if unit.province.terrain != Coastal || destination.terrain != Coastal {
@@ -455,8 +439,11 @@ func (g *Game) Destinations(unit *Occupancy) iter.Seq[*Province] {
 
 // HasNeighbor determines whether a unit can travel to the adjancent destination.
 func (g *Game) HasNeighbor(unit *Occupancy, destination *Province) bool {
-	return g.board.Connection(unit.province, destination) != nil &&
-		destination.terrain.Supports(unit.unit)
+	c := g.board.Connection(unit.province, destination)
+	if c == nil {
+		return false
+	}
+	return c.Traversable(unit.unit)
 }
 
 // Neighbors gets which adjacent provinces a unit can travel to.
@@ -466,11 +453,10 @@ func (g *Game) Neighbors(unit *Occupancy) iter.Seq[*Province] {
 	}
 	return func(yield func(*Province) bool) {
 		for c := range g.board.ConnectionsFrom(unit.province) {
-			to := c.to
-			if !to.terrain.Supports(unit.unit) {
+			if !c.Traversable(unit.unit) {
 				continue
 			}
-			if !yield(to) {
+			if !yield(c.to) {
 				return
 			}
 		}
@@ -556,7 +542,7 @@ func (g *Game) BlockRetreat(province *Province) {
 	if !g.phase.Retreat() {
 		return
 	}
-	g.standoffs[province] = true
+	g.contests[province] = true
 }
 
 // UnblockRetreat allows a space to be retreated to during this retreat phase,
@@ -567,21 +553,22 @@ func (g *Game) UnblockRetreat(province *Province) {
 	if !g.phase.Retreat() {
 		return
 	}
-	delete(g.standoffs, province)
+	delete(g.contests, province)
 }
 
 // AddDislodged creates a unit that must retreat from the given space or disband
 // during this retreat phase.
 //
 // Creating a dislodged unit must follow the same rules as placing a unit there.
-func (g *Game) AddDislodged(province *Province, coast string, unit Unit, country string) error {
+func (g *Game) AddDislodged(province *Province, coast string, unit Unit, country string, from *Province) error {
 	if !g.phase.Retreat() {
 		return errors.New("game not in retreat phase")
 	}
 	occ, err := g.validSetUnit(province, coast, unit, country)
 	if err != nil {
-		return nil
+		return err
 	}
 	g.dislodged[province] = occ
+	g.attackers[occ] = from
 	return nil
 }

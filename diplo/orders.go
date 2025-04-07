@@ -174,10 +174,13 @@ func (g *Game) validParse(name string, valid []*Province) (*Province, error) {
 func (g *Game) ParseOrder(order string, coerce string) (*Order, error) {
 	order = strings.ToLower(order)
 	// Put space around hyphens and arrows for easier processing.
+	// Sometimes coast designations use parentheses.
 	order = strings.ReplaceAll(order, "-", " - ")
 	order = strings.ReplaceAll(order, "--", " - ")
 	order = strings.ReplaceAll(order, "->", " - ")
 	order = strings.ReplaceAll(order, "-->", " - ")
+	order = strings.ReplaceAll(order, "(", " ")
+	order = strings.ReplaceAll(order, ")", " ")
 	// Process parts.
 	var (
 		unit, recipient, target, coast = "", "", "", ""
@@ -189,7 +192,7 @@ func (g *Game) ParseOrder(order string, coerce string) (*Order, error) {
 		if i == 0 && (p == "a" || p == "f") {
 			continue
 		}
-		if c, ok := g.coastParser(p); ok {
+		if c, ok := g.board.ParseCoast(p); ok {
 			// Coast only needed for target.
 			if mode == 2 {
 				coast = c
